@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --panel: #111827;
+  --muted: #6b7280;
+  --text: #e5e7eb;
+  --accent: #38bdf8;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+
+.app-shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+  background: var(--bg);
+}
+
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid #1f2937;
+}
+.top-bar > span {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: #0f172a;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewport-container {
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  background: radial-gradient(circle at center, rgba(56, 189, 248, 0.08), transparent 55%);
+}
+.viewport-container.is-dragging {
+  cursor: grabbing;
+}
+.board-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #050a14;
+}
+
+.zoom-hud {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(8, 12, 22, 0.8);
+  color: #cbd5e1;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.cooldown-chip {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.9);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.cooldown-chip.ready { color: #4ade80; }
+.cooldown-chip.waiting { color: #fbbf24; }
+
+.team-badge.black { color: #cbd5e1; }
+.team-badge.white { color: #f8fafc; }
+
+.toast {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #ef4444;
+  color: white;
+  padding: 6px 14px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 200ms;
+  pointer-events: none;
+}
+.toast.visible { opacity: 1; }
+
+.minimap {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 160px;
+  height: 160px;
+  image-rendering: pixelated;
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.45);
+  cursor: pointer;
+}
