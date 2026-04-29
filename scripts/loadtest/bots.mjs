@@ -17,6 +17,7 @@ const args = parseArgs(process.argv.slice(2));
 const base = args.base ?? "http://localhost:8080";
 const clients = Number(args.clients ?? 100);
 const durationSec = Number(args.duration ?? 60);
+const cooldownMs = Number(args["cooldown-ms"] ?? process.env.MMOTHELLO_COOLDOWN_MS ?? 5000);
 const placeJitterMs = 250;
 
 const stats = {
@@ -28,7 +29,7 @@ const stats = {
 
 async function main() {
   const wsBase = base.replace(/^http/, "ws");
-  console.log(`launching ${clients} bots → ${base} for ${durationSec}s`);
+  console.log(`launching ${clients} bots → ${base} for ${durationSec}s cooldown_ms=${cooldownMs}`);
   for (let i = 0; i < clients; i++) {
     startBot(base, wsBase + "/ws", i).catch((e) => console.error("bot", i, e.message));
     await sleep(5);
@@ -79,9 +80,9 @@ async function startBot(httpBase, wsURL, idx) {
     const [x, y] = candidates[Math.floor(Math.random() * candidates.length)];
     stats.pendingByBot.set(idx, performance.now());
     ws.send(encodePlace(x, y));
-    setTimeout(tryPlace, 5000 + Math.random() * placeJitterMs);
+    setTimeout(tryPlace, cooldownMs + Math.random() * placeJitterMs);
   };
-  setTimeout(tryPlace, Math.random() * 5000);
+  setTimeout(tryPlace, Math.random() * cooldownMs);
 }
 
 function handleFrame(buf, botIdx) {

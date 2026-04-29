@@ -2,14 +2,16 @@ package game
 
 import (
 	"errors"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"mmothello/server/internal/board"
 )
 
-const Cooldown = 2 * time.Second
+var Cooldown = cooldownFromEnv()
 
 var (
 	ErrOutOfBounds = errors.New("out of bounds")
@@ -19,12 +21,12 @@ var (
 )
 
 const (
-	ErrCodeCooldown   uint8 = 1
-	ErrCodeOccupied   uint8 = 2
-	ErrCodeNoFlips    uint8 = 3
+	ErrCodeCooldown    uint8 = 1
+	ErrCodeOccupied    uint8 = 2
+	ErrCodeNoFlips     uint8 = 3
 	ErrCodeOutOfBounds uint8 = 4
-	ErrCodeAuth       uint8 = 5
-	ErrCodeRateLimit  uint8 = 6
+	ErrCodeAuth        uint8 = 5
+	ErrCodeRateLimit   uint8 = 6
 )
 
 type Session struct {
@@ -140,4 +142,17 @@ func ErrorCode(err error) uint8 {
 	default:
 		return 0
 	}
+}
+
+func cooldownFromEnv() time.Duration {
+	const fallback = 5 * time.Second
+	raw := os.Getenv("MMOTHELLO_COOLDOWN_MS")
+	if raw == "" {
+		return fallback
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return fallback
+	}
+	return time.Duration(ms) * time.Millisecond
 }

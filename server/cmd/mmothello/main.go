@@ -62,14 +62,14 @@ func main() {
 	defer cancel()
 
 	go walSyncer(ctx, wal)
-	go snapshotWriter(ctx, b, dataDir)
+	go snapshotWriter(ctx, b, dataDir, wal)
 	go scoreBroadcaster(ctx, hub, b)
 
 	teamPicker := newTeamPicker()
 
-	// Anti-abuse: per-IP place rate (matches per-session 2 s cooldown) and
+	// Anti-abuse: per-IP place rate (matches per-session cooldown) and
 	// per-IP simultaneous WS connection cap. Env vars override for loadtests.
-	placeLimiter := ratelimit.New(envFloat("MMOTHELLO_PLACE_RATE", 0.5),
+	placeLimiter := ratelimit.New(envFloat("MMOTHELLO_PLACE_RATE", 1/game.Cooldown.Seconds()),
 		envFloat("MMOTHELLO_PLACE_BURST", 1.0), 10*time.Minute)
 	connCap := ratelimit.NewConnCap(envInt("MMOTHELLO_CONN_CAP", 5))
 	go func() {
@@ -101,7 +101,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w,
 			`{"sessionID":%d,"team":%d,"cooldownMs":%d}`+"\n",
-			sessionID, teamPicker.assign(sessionID), game.Cooldown.Milliseconds(),
+			sessionID, teamPicker.assign(sessionID, now), game.Cooldown.Milliseconds(),
 		)
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -111,10 +111,11 @@ func main() {
 	})
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		bk, wt, em := b.Score()
+		liveBlack, liveWhite := teamPicker.liveCounts(time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w,
-			`{"black":%d,"white":%d,"empty":%d,"clients":%d}`+"\n",
-			bk, wt, em, hub.ClientCount(),
+			`{"black":%d,"white":%d,"empty":%d,"clients":%d,"liveBlack":%d,"liveWhite":%d}`+"\n",
+			bk, wt, em, hub.ClientCount(), liveBlack, liveWhite,
 		)
 	})
 	mux.Handle("/", http.FileServer(http.Dir("./client/dist")))
@@ -139,29 +140,35 @@ func main() {
 	}
 }
 
-// teamPicker assigns teams to sessions; sticky once chosen so reconnects
-// return to the same color.
+const livePlayerWindow = time.Minute
+
+// teamPicker assigns teams to sessions; sticky once chosen so reconnects return
+// to the same color. New assignments balance by players who have successfully
+// placed within the last minute, not by all historical sessions.
 type teamPicker struct {
-	mu      sync.Mutex
-	by      map[uint64]uint8
-	black   uint64
-	white   uint64
+	mu         sync.Mutex
+	by         map[uint64]uint8
+	lastPlayed map[uint64]time.Time
 }
 
 func newTeamPicker() *teamPicker {
-	return &teamPicker{by: make(map[uint64]uint8)}
+	return &teamPicker{
+		by:         make(map[uint64]uint8),
+		lastPlayed: make(map[uint64]time.Time),
+	}
 }
 
-func (t *teamPicker) assign(sessionID uint64) uint8 {
+func (t *teamPicker) assign(sessionID uint64, now time.Time) uint8 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if v, ok := t.by[sessionID]; ok {
 		return v
 	}
+	black, white := t.liveCountsLocked(now)
 	var v uint8 = 1
-	if t.white < t.black {
+	if white < black {
 		v = 2
-	} else if t.black < t.white {
+	} else if black < white {
 		v = 1
 	} else {
 		// Tied: deterministic by parity.
@@ -172,12 +179,46 @@ func (t *teamPicker) assign(sessionID uint64) uint8 {
 		}
 	}
 	t.by[sessionID] = v
-	if v == 1 {
-		t.black++
-	} else {
-		t.white++
-	}
 	return v
+}
+
+func (t *teamPicker) markPlayed(sessionID uint64, now time.Time) {
+	t.mu.Lock()
+	t.lastPlayed[sessionID] = now
+	t.pruneLocked(now)
+	t.mu.Unlock()
+}
+
+func (t *teamPicker) liveCounts(now time.Time) (black, white int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.liveCountsLocked(now)
+}
+
+func (t *teamPicker) liveCountsLocked(now time.Time) (black, white int) {
+	t.pruneLocked(now)
+	cutoff := now.Add(-livePlayerWindow)
+	for sessionID, last := range t.lastPlayed {
+		if last.Before(cutoff) {
+			continue
+		}
+		switch t.by[sessionID] {
+		case 1:
+			black++
+		case 2:
+			white++
+		}
+	}
+	return black, white
+}
+
+func (t *teamPicker) pruneLocked(now time.Time) {
+	cutoff := now.Add(-2 * livePlayerWindow)
+	for sessionID, last := range t.lastPlayed {
+		if last.Before(cutoff) {
+			delete(t.lastPlayed, sessionID)
+		}
+	}
 }
 
 // ---------- background loops ----------
@@ -198,7 +239,7 @@ func walSyncer(ctx context.Context, wal *persist.WAL) {
 	}
 }
 
-func snapshotWriter(ctx context.Context, b *board.Board, dir string) {
+func snapshotWriter(ctx context.Context, b *board.Board, dir string, wal *persist.WAL) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for {
@@ -206,11 +247,16 @@ func snapshotWriter(ctx context.Context, b *board.Board, dir string) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			ts := time.Now()
 			b.LockAllRead()
 			data := append([]byte(nil), encodeBoard(b)...)
 			b.UnlockAllRead()
-			if err := persist.WriteSnapshot(dir, time.Now(), data); err != nil {
+			if err := persist.WriteSnapshot(dir, ts, data); err != nil {
 				log.Printf("snapshot: %v", err)
+				continue
+			}
+			if err := wal.CompactAfter(ts.UnixMilli()); err != nil {
+				log.Printf("wal compact: %v", err)
 			}
 		}
 	}
@@ -261,12 +307,79 @@ func restoreFromDisk(b *board.Board, dir string) error {
 	// Recount per-chunk after restore.
 	b.RecountChunks()
 	walPath := filepath.Join(dir, "wal.log")
-	return persist.ReplayWAL(walPath, snap.Meta.TimestampUnix, func(e persist.WALEntry) error {
-		// We don't replay placement logic here (the snapshot was taken after
-		// the placement was applied in memory). The WAL is only for bridging
-		// the window between snapshot writes; replay is best-effort logging.
+	if err := persist.ReplayWAL(walPath, snap.Meta.TimestampMs, func(e persist.WALEntry) error {
+		team := board.Cell(e.Team)
+		if team != board.CellBlack && team != board.CellWhite {
+			return nil
+		}
+		return replayCommittedPlacement(b, int(e.X), int(e.Y), team)
+	}); err != nil {
+		return err
+	}
+	b.RecountChunks()
+	return nil
+}
+
+func replayCommittedPlacement(b *board.Board, x, y int, team board.Cell) error {
+	if !board.InBounds(x, y) {
 		return nil
-	})
+	}
+	if b.Get(x, y) != board.CellEmpty {
+		return nil
+	}
+	readIDs := b.LockReadBox(x, y, board.MaxFlipDistance)
+	flips := board.ComputeFlips(b, x, y, team)
+	b.UnlockChunksRead(readIDs)
+	if len(flips) == 0 {
+		return nil
+	}
+	seen := map[uint16]struct{}{board.ChunkOf(x, y): {}}
+	for _, f := range flips {
+		seen[board.ChunkOf(int(f.X), int(f.Y))] = struct{}{}
+	}
+	ids := make([]uint16, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	b.LockChunksWrite(ids)
+	defer b.UnlockChunksWrite(ids)
+	if b.Get(x, y) != board.CellEmpty {
+		return nil
+	}
+	flips = board.ComputeFlips(b, x, y, team)
+	if len(flips) == 0 {
+		return nil
+	}
+	b.ApplyCellChange(x, y, team)
+	for _, f := range flips {
+		b.ApplyCellChange(int(f.X), int(f.Y), team)
+	}
+	for _, id := range ids {
+		b.BumpVersion(id)
+	}
+	return nil
+}
+
+func sendChunkSnapshot(enqueue func([]byte), b *board.Board, chunkID uint16) {
+	b.LockChunkRead(chunkID)
+	var packed [protocol.ChunkPackedBytes]byte
+	b.PackChunk(chunkID, packed[:])
+	version := b.ChunkVersion(chunkID)
+	b.UnlockChunkRead(chunkID)
+	snap := protocol.Snapshot{ChunkID: chunkID, Version: version, Packed: packed}
+	if pl, err := protocol.EncodeFrame(snap); err == nil {
+		enqueue(pl)
+	}
+}
+
+func sendResnapshotsIfNeeded(enqueue func([]byte), hub *netpkg.Hub, b *board.Board, sessionID uint64) {
+	chunks, needed := hub.TakeResnapshot(sessionID)
+	if !needed {
+		return
+	}
+	for _, chunkID := range chunks {
+		sendChunkSnapshot(enqueue, b, chunkID)
+	}
 }
 
 func scoreBroadcaster(ctx context.Context, hub *netpkg.Hub, b *board.Board) {
@@ -344,7 +457,7 @@ func serveWS(
 		return err
 	}
 
-	team := teams.assign(sessionID)
+	team := teams.assign(sessionID, time.Now())
 	teamCell := board.CellBlack
 	if team == 2 {
 		teamCell = board.CellWhite
@@ -444,15 +557,8 @@ func serveWS(
 			if !hub.Subscribe(sessionID, v.ChunkID) {
 				continue
 			}
-			b.LockChunkRead(v.ChunkID)
-			var packed [protocol.ChunkPackedBytes]byte
-			b.PackChunk(v.ChunkID, packed[:])
-			version := b.ChunkVersion(v.ChunkID)
-			b.UnlockChunkRead(v.ChunkID)
-			snap := protocol.Snapshot{ChunkID: v.ChunkID, Version: version, Packed: packed}
-			if pl, err := protocol.EncodeFrame(snap); err == nil {
-				enqueue(pl)
-			}
+			sendChunkSnapshot(enqueue, b, v.ChunkID)
+			sendResnapshotsIfNeeded(enqueue, hub, b, sessionID)
 		case protocol.Unsubscribe:
 			hub.Unsubscribe(sessionID, v.ChunkID)
 		case protocol.Ping:
@@ -472,12 +578,13 @@ func serveWS(
 				}
 				continue
 			}
-			handlePlace(enqueue, hub, g, gsess, wal, int(v.X), int(v.Y))
+			handlePlace(enqueue, hub, g, gsess, teams, wal, int(v.X), int(v.Y))
+			sendResnapshotsIfNeeded(enqueue, hub, b, sessionID)
 		}
 	}
 }
 
-func handlePlace(enqueue func([]byte), hub *netpkg.Hub, g *game.Game, gsess *game.Session, wal *persist.WAL, x, y int) {
+func handlePlace(enqueue func([]byte), hub *netpkg.Hub, g *game.Game, gsess *game.Session, teams *teamPicker, wal *persist.WAL, x, y int) {
 	flips, err := g.Place(gsess, x, y)
 	if err != nil {
 		ack := protocol.PlaceAck{
@@ -491,7 +598,8 @@ func handlePlace(enqueue func([]byte), hub *netpkg.Hub, g *game.Game, gsess *gam
 		return
 	}
 	now := time.Now().UnixMilli()
-	_ = wal.Append(persist.WALEntry{SessionID: gsess.ID, X: uint16(x), Y: uint16(y), TS: now / 1000})
+	teams.markPlayed(gsess.ID, time.UnixMilli(now))
+	_ = wal.Append(persist.WALEntry{SessionID: gsess.ID, X: uint16(x), Y: uint16(y), Team: uint8(gsess.Team), TS: now})
 
 	entries := make([]protocol.Delta, 0, len(flips)+1)
 	entries = append(entries, protocol.Delta{X: uint16(x), Y: uint16(y), Cell: uint8(gsess.Team)})
@@ -632,4 +740,3 @@ func requestLogger(next http.Handler) http.Handler {
 		log.Printf("%s %s from=%s dur_ms=%d", r.Method, r.URL.Path, r.RemoteAddr, time.Since(start).Milliseconds())
 	})
 }
-

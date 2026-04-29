@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Server tests
+        working-directory: server
+        run: go test ./...
+
+      - name: Server race tests
+        working-directory: server
+        run: go test -race ./...
+
+      - name: Client install
+        working-directory: client
+        run: npm ci
+
+      - name: Client tests
+        working-directory: client
+        run: npm test
+
+      - name: Client build
+        working-directory: client
+        run: npm run build

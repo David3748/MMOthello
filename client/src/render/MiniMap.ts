@@ -44,7 +44,7 @@ export class MiniMap {
   private draw(): void {
     const ctx = this.element.getContext("2d");
     if (!ctx) return;
-    ctx.fillStyle = "#0f172a";
+    ctx.fillStyle = "#2f4034";
     ctx.fillRect(0, 0, this.element.width, this.element.height);
     const totalCellsPerChunk = CHUNK_SIZE * CHUNK_SIZE;
 
@@ -81,8 +81,8 @@ export class MiniMap {
 }
 
 function pickFill(black: number, white: number, _samples: number, _total: number): string {
-  if (black === 0 && white === 0) return "#1f2937";
-  if (black > white) return "#374151";
-  if (white > black) return "#e5e7eb";
-  return "#94a3b8";
+  if (black === 0 && white === 0) return "#3b5140";
+  if (black > white) return "#111513";
+  if (white > black) return "#f4f1e8";
+  return "#9aa893";
 }

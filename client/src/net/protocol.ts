@@ -115,11 +115,16 @@ export function decodeServerFrame(buffer: ArrayBuffer): DecodedServerFrame {
         serverTimeMs: view.getBigInt64(5, true),
       };
     case ServerOpcode.Error:
-      return {
-        opcode,
-        code: view.getUint8(1),
-        message: new TextDecoder().decode(bytes.slice(2)),
-      };
+      if (buffer.byteLength < 4) throw new Error("Error frame too short");
+      {
+        const msgLen = view.getUint16(2, true);
+        if (buffer.byteLength !== 4 + msgLen) throw new Error("Error frame length mismatch");
+        return {
+          opcode,
+          code: view.getUint8(1),
+          message: new TextDecoder().decode(bytes.slice(4, 4 + msgLen)),
+        };
+      }
     default:
       throw new Error(`Unknown server opcode: ${opcode}`);
   }

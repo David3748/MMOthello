@@ -171,3 +171,26 @@ func (c *Client) SnapshotFlags() (slow bool, needResnapshot bool) {
 	defer c.mu.Unlock()
 	return c.SlowConsumer, c.NeedResnapshot
 }
+
+func (h *Hub) TakeResnapshot(sessionID uint64) ([]uint16, bool) {
+	h.mu.RLock()
+	client, ok := h.clients[sessionID]
+	if !ok {
+		h.mu.RUnlock()
+		return nil, false
+	}
+	chunks := make([]uint16, 0, len(client.subscribedChunk))
+	for chunkID := range client.subscribedChunk {
+		chunks = append(chunks, chunkID)
+	}
+	h.mu.RUnlock()
+
+	client.mu.Lock()
+	needed := client.NeedResnapshot
+	if needed {
+		client.NeedResnapshot = false
+		client.SlowConsumer = false
+	}
+	client.mu.Unlock()
+	return chunks, needed
+}

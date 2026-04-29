@@ -1,20 +1,20 @@
 # Inspect Scripts
 
-This directory contains inspection/debug tooling placeholders for MMOthello snapshots and state artifacts.
+This directory contains inspection/debug tooling for MMOthello snapshots and state artifacts.
 
 ## Purpose
 
-Planned use (Phase 3) is to inspect snapshot binaries/WAL metadata and print human-readable summaries for debugging recovery correctness.
+The inspector reads snapshot binaries, WAL files, and snapshot metadata to print human-readable summaries for debugging recovery correctness.
 
-## Current Stub
+## Tool
 
-- `run.sh`: executable placeholder script that accepts a path and reports what would be inspected.
+- `run.sh`: detects artifact type by filename or accepts `--kind snapshot|wal|meta`.
 
 ## Usage
 
 ```bash
 ./scripts/inspect/run.sh --help
-./scripts/inspect/run.sh --file ./snapshot-latest.bin
+./scripts/inspect/run.sh --file ./server/data/meta.json
+./scripts/inspect/run.sh --file ./server/data/wal.log --kind wal
+./scripts/inspect/run.sh --file ./server/data/snapshot-1700000000.bin --kind snapshot
 ```
-
-The script currently does not parse binary artifacts yet; it is a scaffold for future implementation.

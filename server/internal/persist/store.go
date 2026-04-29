@@ -17,6 +17,7 @@ var ErrNoSnapshot = errors.New("no snapshot found")
 
 type SnapshotMeta struct {
 	TimestampUnix int64  `json:"timestamp_unix"`
+	TimestampMs   int64  `json:"timestamp_ms"`
 	SnapshotFile  string `json:"snapshot_file"`
 }
 
@@ -29,6 +30,7 @@ type WALEntry struct {
 	SessionID uint64
 	X         uint16
 	Y         uint16
+	Team      uint8
 	TS        int64
 }
 
@@ -56,6 +58,7 @@ func WriteSnapshot(dir string, ts time.Time, data []byte) error {
 
 	meta := SnapshotMeta{
 		TimestampUnix: ts.Unix(),
+		TimestampMs:   ts.UnixMilli(),
 		SnapshotFile:  snapName,
 	}
 	metaBytes, err := json.Marshal(meta)
@@ -85,6 +88,9 @@ func LoadLatestSnapshot(dir string) (Snapshot, error) {
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return Snapshot{}, err
 	}
+	if meta.TimestampMs == 0 && meta.TimestampUnix != 0 {
+		meta.TimestampMs = meta.TimestampUnix * 1000
+	}
 
 	dataPath := filepath.Join(dir, meta.SnapshotFile)
 	data, err := os.ReadFile(dataPath)
@@ -95,7 +101,7 @@ func LoadLatestSnapshot(dir string) (Snapshot, error) {
 }
 
 func OpenWAL(path string) (*WAL, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -106,11 +112,12 @@ func OpenWAL(path string) (*WAL, error) {
 }
 
 func (w *WAL) Append(entry WALEntry) error {
-	var buf [20]byte
+	var buf [21]byte
 	binary.LittleEndian.PutUint64(buf[0:], entry.SessionID)
 	binary.LittleEndian.PutUint16(buf[8:], entry.X)
 	binary.LittleEndian.PutUint16(buf[10:], entry.Y)
-	binary.LittleEndian.PutUint64(buf[12:], uint64(entry.TS))
+	buf[12] = entry.Team
+	binary.LittleEndian.PutUint64(buf[13:], uint64(entry.TS))
 	w.mu.Lock()
 	_, err := w.bw.Write(buf[:])
 	w.mu.Unlock()
@@ -136,7 +143,42 @@ func (w *WAL) Close() error {
 	return w.f.Close()
 }
 
-func ReplayWAL(path string, sinceUnix int64, fn func(WALEntry) error) error {
+func (w *WAL) CompactAfter(cutoffMs int64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.bw.Flush(); err != nil {
+		return err
+	}
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	raw, err := io.ReadAll(w.f)
+	if err != nil {
+		return err
+	}
+
+	kept := make([]byte, 0, len(raw))
+	for offset := 0; offset+21 <= len(raw); offset += 21 {
+		ts := int64(binary.LittleEndian.Uint64(raw[offset+13 : offset+21]))
+		if ts > cutoffMs {
+			kept = append(kept, raw[offset:offset+21]...)
+		}
+	}
+
+	if err := w.f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := w.f.Write(kept); err != nil {
+		return err
+	}
+	return w.f.Sync()
+}
+
+func ReplayWAL(path string, sinceMs int64, fn func(WALEntry) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -146,7 +188,7 @@ func ReplayWAL(path string, sinceUnix int64, fn func(WALEntry) error) error {
 	}
 	defer f.Close()
 
-	var buf [20]byte
+	var buf [21]byte
 	for {
 		_, err := io.ReadFull(f, buf[:])
 		if err != nil {
@@ -164,9 +206,10 @@ func ReplayWAL(path string, sinceUnix int64, fn func(WALEntry) error) error {
 			SessionID: binary.LittleEndian.Uint64(buf[0:8]),
 			X:         binary.LittleEndian.Uint16(buf[8:10]),
 			Y:         binary.LittleEndian.Uint16(buf[10:12]),
-			TS:        int64(binary.LittleEndian.Uint64(buf[12:20])),
+			Team:      buf[12],
+			TS:        int64(binary.LittleEndian.Uint64(buf[13:21])),
 		}
-		if e.TS <= sinceUnix {
+		if e.TS <= sinceMs {
 			continue
 		}
 		if err := fn(e); err != nil {

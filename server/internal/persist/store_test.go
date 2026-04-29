@@ -23,6 +23,9 @@ func TestSnapshotWriteAndLoad(t *testing.T) {
 	if got.Meta.TimestampUnix != ts.Unix() {
 		t.Fatalf("timestamp mismatch: got=%d want=%d", got.Meta.TimestampUnix, ts.Unix())
 	}
+	if got.Meta.TimestampMs != ts.UnixMilli() {
+		t.Fatalf("timestamp ms mismatch: got=%d want=%d", got.Meta.TimestampMs, ts.UnixMilli())
+	}
 	if !reflect.DeepEqual(got.Data, wantData) {
 		t.Fatalf("snapshot bytes mismatch: got=%v want=%v", got.Data, wantData)
 	}
@@ -43,9 +46,9 @@ func TestSnapshotReplayConsistency(t *testing.T) {
 		t.Fatalf("OpenWAL: %v", err)
 	}
 	entries := []WALEntry{
-		{SessionID: 1, X: 0, Y: 0, TS: ts0.Unix() + 1},
-		{SessionID: 2, X: 2, Y: 0, TS: ts0.Unix() + 2},
-		{SessionID: 3, X: 3, Y: 0, TS: ts0.Unix() + 3},
+		{SessionID: 1, X: 0, Y: 0, Team: 1, TS: ts0.UnixMilli() + 1},
+		{SessionID: 2, X: 2, Y: 0, Team: 2, TS: ts0.UnixMilli() + 2},
+		{SessionID: 3, X: 3, Y: 0, Team: 1, TS: ts0.UnixMilli() + 3},
 	}
 	for _, e := range entries {
 		if err := wal.Append(e); err != nil {
@@ -65,7 +68,7 @@ func TestSnapshotReplayConsistency(t *testing.T) {
 	}
 	gotState := append([]byte(nil), snap.Data...)
 
-	if err := ReplayWAL(walPath, snap.Meta.TimestampUnix, func(e WALEntry) error {
+	if err := ReplayWAL(walPath, snap.Meta.TimestampMs, func(e WALEntry) error {
 		idx := int(e.X)
 		if idx < len(gotState) {
 			gotState[idx] = byte(e.SessionID)
@@ -89,7 +92,7 @@ func TestReplayIgnoresPartialTailRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWAL: %v", err)
 	}
-	if err := wal.Append(WALEntry{SessionID: 9, X: 1, Y: 1, TS: 10}); err != nil {
+	if err := wal.Append(WALEntry{SessionID: 9, X: 1, Y: 1, Team: 2, TS: 10}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if err := wal.Sync(); err != nil {
@@ -118,7 +121,42 @@ func TestReplayIgnoresPartialTailRecord(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ReplayWAL: %v", err)
 	}
-	if len(got) != 1 || got[0].SessionID != 9 {
+	if len(got) != 1 || got[0].SessionID != 9 || got[0].Team != 2 {
 		t.Fatalf("unexpected entries after partial tail: %+v", got)
+	}
+}
+
+func TestCompactAfterKeepsNewerEntries(t *testing.T) {
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "wal.log")
+	wal, err := OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("OpenWAL: %v", err)
+	}
+	for _, e := range []WALEntry{
+		{SessionID: 1, X: 1, Team: 1, TS: 100},
+		{SessionID: 2, X: 2, Team: 2, TS: 200},
+		{SessionID: 3, X: 3, Team: 1, TS: 300},
+	} {
+		if err := wal.Append(e); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if err := wal.CompactAfter(200); err != nil {
+		t.Fatalf("CompactAfter: %v", err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var got []WALEntry
+	if err := ReplayWAL(walPath, 0, func(e WALEntry) error {
+		got = append(got, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReplayWAL: %v", err)
+	}
+	if len(got) != 1 || got[0].SessionID != 3 {
+		t.Fatalf("unexpected compacted WAL: %+v", got)
 	}
 }

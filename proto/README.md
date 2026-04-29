@@ -57,7 +57,7 @@ cell = (b >> shift) & 0b11
 - `0x84` `PlaceAck { ok uint8, nextAllowedMs int64, errCode uint8 }`
 - `0x85` `Score { black uint32, white uint32, empty uint32 }`
 - `0x86` `Pong { nonce uint32, serverTimeMs int64 }`
-- `0x87` `Error { code uint8, msg string }`
+- `0x87` `Error { code uint8, msgLen uint16, msg[msgLen] }`
 
 ## WebSocket framing
 
@@ -67,10 +67,30 @@ additional length prefix because WebSocket already provides framing.
 
 ## Authentication
 
-`GET /session` issues a 32-byte token in an HttpOnly `mmothello_token`
-cookie. The browser uses the cookie automatically when upgrading `/ws`.
-For programmatic clients that can't send custom headers (e.g. Node's
-built-in `WebSocket`), the server also accepts `?token=<hex>` on `/ws`.
+`GET /session` is the v1 browser bootstrap. It issues a 32-byte token in an
+HttpOnly `mmothello_token` cookie and returns JSON containing `sessionID`,
+`team`, and `cooldownMs`. Browsers use the cookie automatically when
+upgrading `/ws`.
+
+For programmatic clients that can't send custom headers (e.g. Node's built-in
+`WebSocket`), the server also accepts `?token=<hex>` on `/ws`. `Hello` remains
+in the binary protocol for compatibility, but v1 authentication is completed
+before the WebSocket upgrade.
+
+## Persistence Frames
+
+The WAL stores committed placements as fixed 21-byte records:
+
+```text
+sessionID uint64
+x         uint16
+y         uint16
+team      uint8   // 1=black, 2=white
+tsMs      uint64  // unix milliseconds
+```
+
+Snapshots are full-board packed byte arrays plus `meta.json`, which includes
+both `timestamp_unix` and `timestamp_ms` for compatibility and precise replay.
 
 ## Error Codes
 
